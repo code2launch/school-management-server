@@ -1,0 +1,25 @@
+enum UserRole {
+  ADMIN
+  TEACHER
+  STUDENT
+  PARENT
+  SUPPORT_STAFF
+}
+
+model User {
+  id          String    @id @default(uuid())
+  name        String
+  phone       String    @unique
+  password    String
+  role        UserRole
+  isActive    Boolean   @default(true)
+  isDeleted   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  teacher     Teacher?
+  student     Student?
+  parent      Parent?
+
+  @@map("users")
+}

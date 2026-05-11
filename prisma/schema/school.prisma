@@ -1,0 +1,116 @@
+model SchoolProfile {
+  id          String   @id @default(uuid())
+  name        String
+  address     String?
+  phone       String?
+  email       String?
+  logoUrl     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("school_profiles")
+}
+
+model AcademicYear {
+  id          String    @id @default(uuid())
+  year        String    @unique // e.g. "2024"
+  isCurrent   Boolean   @default(false)
+  startDate   DateTime
+  endDate     DateTime
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  enrollments Enrollment[]
+  attendances StudentAttendance[]
+  teacherAttendances TeacherAttendance[]
+  exams       Exam[]
+  feeStructures FeeStructure[]
+  feePayments FeePayment[]
+
+  @@map("academic_years")
+}
+
+model Class {
+  id          String    @id @default(uuid())
+  name        String    // e.g. "Class 1", "Class 10"
+  numericValue Int      // 1-10 for sorting
+  isActive    Boolean   @default(true)
+  isDeleted   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  sections    Section[]
+  subjects    Subject[]
+  enrollments Enrollment[]
+
+  @@map("classes")
+}
+
+model Section {
+  id          String    @id @default(uuid())
+  name        String    // A, B, C etc.
+  classId     String
+  isActive    Boolean   @default(true)
+  isDeleted   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  class       Class     @relation(fields: [classId], references: [id])
+  enrollments Enrollment[]
+  attendances StudentAttendance[]
+  routineSlots RoutineSlot[]
+  examResults ExamResult[]
+
+  @@unique([classId, name])
+  @@map("sections")
+}
+
+model Subject {
+  id          String    @id @default(uuid())
+  name        String
+  code        String?
+  classId     String
+  isActive    Boolean   @default(true)
+  isDeleted   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  class       Class     @relation(fields: [classId], references: [id])
+  teacherAssignments TeacherSubjectAssignment[]
+  routineSlots RoutineSlot[]
+  examSubjects ExamSubject[]
+  examResults  ExamResult[]
+
+  @@unique([classId, name])
+  @@map("subjects")
+}
+
+enum DayOfWeek {
+  SUNDAY
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+}
+
+model RoutineSlot {
+  id          String     @id @default(uuid())
+  sectionId   String
+  subjectId   String
+  teacherId   String?
+  dayOfWeek   DayOfWeek
+  periodNumber Int
+  startTime   String     // "08:00"
+  endTime     String     // "08:45"
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  section     Section    @relation(fields: [sectionId], references: [id])
+  subject     Subject    @relation(fields: [subjectId], references: [id])
+  teacher     Teacher?   @relation(fields: [teacherId], references: [id])
+
+  @@unique([sectionId, dayOfWeek, periodNumber])
+  @@map("routine_slots")
+}

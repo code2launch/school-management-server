@@ -1,0 +1,148 @@
+// ─── FEES ────────────────────────────────────────────────────
+
+enum FeeType {
+  ADMISSION
+  MONTHLY_TUITION
+  EXAM
+  OTHER
+}
+
+model FeeStructure {
+  id              String    @id @default(uuid())
+  classId         String?   // null = applies to all classes
+  feeType         FeeType
+  amount          Float
+  label           String    // e.g. "Monthly Tuition - Class 5"
+  academicYearId  String
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  academicYear    AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  @@map("fee_structures")
+}
+
+enum PaymentStatus {
+  PAID
+  UNPAID
+  PARTIAL
+}
+
+model FeePayment {
+  id              String        @id @default(uuid())
+  receiptNumber   String        @unique // e.g. RCP-2024-00001
+  studentId       String
+  academicYearId  String
+  feeType         FeeType
+  month           Int?          // 1-12, null for one-time fees
+  year            Int?
+  amount          Float
+  paidAmount      Float         @default(0)
+  dueAmount       Float         @default(0)
+  paymentStatus   PaymentStatus @default(UNPAID)
+  paymentMethod   String?       // Cash, bKash, etc.
+  paymentDate     DateTime?
+  collectedBy     String?       // admin name
+  note            String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  student         Student       @relation(fields: [studentId], references: [id])
+  academicYear    AcademicYear  @relation(fields: [academicYearId], references: [id])
+
+  @@map("fee_payments")
+}
+
+
+// ─── EXAMS ───────────────────────────────────────────────────
+
+enum ExamType {
+  CLASS_TEST
+  MID_TERM
+  FINAL
+  OTHER
+}
+
+model Exam {
+  id              String    @id @default(uuid())
+  name            String
+  examType        ExamType
+  classId         String?   // null = all classes
+  academicYearId  String
+  startDate       DateTime?
+  endDate         DateTime?
+  isPublished     Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  academicYear    AcademicYear  @relation(fields: [academicYearId], references: [id])
+  subjects        ExamSubject[]
+  results         ExamResult[]
+
+  @@map("exams")
+}
+
+model ExamSubject {
+  id          String    @id @default(uuid())
+  examId      String
+  subjectId   String
+  totalMarks  Float     @default(100)
+  passMarks   Float     @default(33)
+  examDate    DateTime?
+  createdAt   DateTime  @default(now())
+
+  exam        Exam      @relation(fields: [examId], references: [id])
+  subject     Subject   @relation(fields: [subjectId], references: [id])
+
+  @@unique([examId, subjectId])
+  @@map("exam_subjects")
+}
+
+model ExamResult {
+  id              String    @id @default(uuid())
+  examId          String
+  studentId       String
+  sectionId       String
+  subjectId       String
+  marksObtained   Float
+  totalMarks      Float
+  grade           String?   // A+, A, B, etc.
+  gradePoint      Float?    // GPA
+  isPassed        Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  exam            Exam      @relation(fields: [examId], references: [id])
+  student         Student   @relation(fields: [studentId], references: [id])
+  section         Section   @relation(fields: [sectionId], references: [id])
+  subject         Subject   @relation(fields: [subjectId], references: [id])
+
+  @@unique([examId, studentId, subjectId])
+  @@map("exam_results")
+}
+
+
+// ─── NOTICE ──────────────────────────────────────────────────
+
+enum NoticeAudience {
+  ALL
+  STUDENTS
+  PARENTS
+  TEACHERS
+  STAFF
+}
+
+model Notice {
+  id          String         @id @default(uuid())
+  title       String
+  content     String
+  audience    NoticeAudience @default(ALL)
+  publishedBy String         // userId
+  isPublished Boolean        @default(true)
+  isDeleted   Boolean        @default(false)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@map("notices")
+}
