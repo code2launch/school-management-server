@@ -2,12 +2,13 @@ import bcrypt from "bcrypt";
 import httpStatus from "http-status";
 import { prisma } from "../../shared/prisma";
 import ApiError from "../../errors/ApiError";
-import { generateStudentId } from "../../constants";
 import { paginationHelpers } from "../../helper/paginationHelper";
 
-// ── Admission ─────────────────────────────────────────────────
+// ======================================================
+// TYPES
+// ======================================================
 
-const admitStudent = async (payload: {
+type AdmitStudentPayload = {
   name: string;
   dob?: string;
   gender?: string;
@@ -21,35 +22,166 @@ const admitStudent = async (payload: {
   parentRelation?: string;
   createParentLogin?: boolean;
   createStudentLogin?: boolean;
-}) => {
+};
+
+type StudentFilters = {
+  classId?: string;
+  sectionId?: string;
+  academicYearId?: string;
+  searchTerm?: string;
+  isActive?: string;
+};
+
+type PaginationOptions = {
+  page?: number;
+  limit?: number;
+  sortBy?: string;
+  sortOrder?: string;
+};
+
+// ======================================================
+// CONSTANTS
+// ======================================================
+
+const DEFAULT_PASSWORD = "school@123";
+
+// ======================================================
+// HELPERS
+// ======================================================
+
+const generateStudentCode = async (year: number) => {
+  const latestStudent = await prisma.student.findFirst({
+    orderBy: {
+      createdAt: "desc",
+    },
+    select: {
+      studentId: true,
+    },
+  });
+
+  let nextNumber = 1;
+
+  if (latestStudent?.studentId) {
+    const parts = latestStudent.studentId.split("-");
+    const lastNumber = Number(parts[2]);
+
+    if (!isNaN(lastNumber)) {
+      nextNumber = lastNumber + 1;
+    }
+  }
+
+  return `STD-${year}-${String(nextNumber).padStart(4, "0")}`;
+};
+
+const buildStudentInclude = () => ({
+  enrollments: {
+    where: {
+      isActive: true,
+    },
+    include: {
+      section: {
+        include: {
+          class: true,
+        },
+      },
+      academicYear: true,
+    },
+    take: 1,
+  },
+  parents: {
+    where: {
+      isPrimary: true,
+    },
+    include: {
+      parent: {
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          relation: true,
+        },
+      },
+    },
+  },
+});
+
+// ======================================================
+// ADMIT STUDENT
+// ======================================================
+
+const admitStudent = async (payload: AdmitStudentPayload) => {
   const [section, academicYear] = await Promise.all([
-    prisma.section.findFirst({ where: { id: payload.sectionId, isDeleted: false } }),
-    prisma.academicYear.findUnique({ where: { id: payload.academicYearId } }),
+    prisma.section.findFirst({
+      where: {
+        id: payload.sectionId,
+        isDeleted: false,
+      },
+      select: {
+        id: true,
+        classId: true,
+      },
+    }),
+
+    prisma.academicYear.findUnique({
+      where: {
+        id: payload.academicYearId,
+      },
+      select: {
+        id: true,
+        year: true,
+      },
+    }),
   ]);
-  if (!section) throw new ApiError(httpStatus.NOT_FOUND, "Section not found.");
-  if (!academicYear) throw new ApiError(httpStatus.NOT_FOUND, "Academic year not found.");
 
-  // Generate sequential student ID
-  const count = await prisma.student.count();
-  const studentId = generateStudentId(Number(academicYear.year), count + 1);
+  if (!section) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Section not found.");
+  }
 
-  return prisma.$transaction(async (tx) => {
-    // Create student user account (optional)
-    let studentUserId: string | undefined;
+  if (!academicYear) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Academic year not found.");
+  }
+
+  // Validate section belongs to class
+  if (section.classId !== payload.classId) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      "Section does not belong to the selected class.",
+    );
+  }
+
+  // Generate student ID
+  const studentId = await generateStudentCode(Number(academicYear.year));
+
+  // Hash password outside transaction
+  const hashedPassword = await bcrypt.hash(DEFAULT_PASSWORD, 10);
+
+  const createdStudentId = await prisma.$transaction(async (tx) => {
+    // =========================================
+    // STUDENT USER
+    // =========================================
+
+    let studentUserId: string | null = null;
+
     if (payload.createStudentLogin) {
-      const defaultPhone = `STD${String(count + 1).padStart(6, "0")}`;
       const studentUser = await tx.user.create({
         data: {
           name: payload.name,
-          phone: defaultPhone,
-          password: await bcrypt.hash("school@123", 10),
+          phone: studentId,
+          password: hashedPassword,
           role: "STUDENT",
         },
+        select: {
+          id: true,
+        },
       });
+
       studentUserId = studentUser.id;
     }
 
-    // Create student
+    // =========================================
+    // STUDENT
+    // =========================================
+
     const student = await tx.student.create({
       data: {
         studentId,
@@ -59,9 +191,15 @@ const admitStudent = async (payload: {
         address: payload.address,
         userId: studentUserId,
       },
+      select: {
+        id: true,
+      },
     });
 
-    // Enrollment
+    // =========================================
+    // ENROLLMENT
+    // =========================================
+
     await tx.enrollment.create({
       data: {
         studentId: student.id,
@@ -73,25 +211,41 @@ const admitStudent = async (payload: {
       },
     });
 
-    // Parent linkage
+    // =========================================
+    // PARENT
+    // =========================================
+
     if (payload.parentName && payload.parentPhone) {
-      let parent = await tx.parent.findFirst({
-        where: { phone: payload.parentPhone, isDeleted: false },
+      let parent = await tx.parent.findUnique({
+        where: {
+          phone: payload.parentPhone,
+        },
+        select: {
+          id: true,
+          userId: true,
+        },
       });
 
+      // Create parent if not exists
       if (!parent) {
-        let parentUserId: string | undefined;
+        let parentUserId: string | null = null;
+
         if (payload.createParentLogin) {
           const parentUser = await tx.user.create({
             data: {
               name: payload.parentName,
               phone: payload.parentPhone,
-              password: await bcrypt.hash("school@123", 10),
+              password: hashedPassword,
               role: "PARENT",
             },
+            select: {
+              id: true,
+            },
           });
+
           parentUserId = parentUser.id;
         }
+
         parent = await tx.parent.create({
           data: {
             name: payload.parentName,
@@ -99,137 +253,288 @@ const admitStudent = async (payload: {
             relation: payload.parentRelation,
             userId: parentUserId,
           },
+          select: {
+            id: true,
+            userId: true,
+          },
         });
       }
 
-      await tx.studentParent.create({
-        data: { studentId: student.id, parentId: parent.id, isPrimary: true },
+      // Prevent duplicate mapping
+      const existingRelation = await tx.studentParent.findFirst({
+        where: {
+          studentId: student.id,
+          parentId: parent.id,
+        },
       });
+
+      if (!existingRelation) {
+        await tx.studentParent.create({
+          data: {
+            studentId: student.id,
+            parentId: parent.id,
+            isPrimary: true,
+          },
+        });
+      }
     }
 
-    return tx.student.findUnique({
-      where: { id: student.id },
-      include: {
-        enrollments: {
-          include: {
-            section: { include: { class: true } },
-            academicYear: true,
-          },
-        },
-        parents: { include: { parent: true } },
-      },
-    });
+    return student.id;
+  });
+
+  return prisma.student.findUnique({
+    where: {
+      id: createdStudentId,
+    },
+    include: buildStudentInclude(),
   });
 };
 
-// ── Query ─────────────────────────────────────────────────────
+// ======================================================
+// GET ALL STUDENTS
+// ======================================================
 
 const getAllStudents = async (
-  filters: {
-    classId?: string;
-    sectionId?: string;
-    academicYearId?: string;
-    searchTerm?: string;
-    isActive?: string;
-  },
-  pagination: { page?: number; limit?: number; sortBy?: string; sortOrder?: string }
+  filters: StudentFilters,
+  pagination: PaginationOptions,
 ) => {
   const { page, limit, skip, sortBy, sortOrder } =
     paginationHelpers.calculatePagination(pagination);
 
-  const where: any = { isDeleted: false };
+  const where: any = {
+    isDeleted: false,
+  };
 
-  if (filters.isActive !== undefined) where.isActive = filters.isActive === "true";
+  // =========================================
+  // FILTERS
+  // =========================================
+
+  if (filters.isActive !== undefined) {
+    where.isActive = filters.isActive === "true";
+  }
 
   if (filters.searchTerm) {
     where.OR = [
-      { name: { contains: filters.searchTerm, mode: "insensitive" } },
-      { studentId: { contains: filters.searchTerm, mode: "insensitive" } },
+      {
+        name: {
+          contains: filters.searchTerm,
+          mode: "insensitive",
+        },
+      },
+      {
+        studentId: {
+          contains: filters.searchTerm,
+          mode: "insensitive",
+        },
+      },
     ];
   }
 
-  // Filter by class/section via enrollments
-  const enrollmentFilter: any = {};
-  if (filters.academicYearId) enrollmentFilter.academicYearId = filters.academicYearId;
-  if (filters.classId) enrollmentFilter.classId = filters.classId;
-  if (filters.sectionId) enrollmentFilter.sectionId = filters.sectionId;
+  // =========================================
+  // ENROLLMENT FILTER
+  // =========================================
 
-  if (Object.keys(enrollmentFilter).length > 0) {
-    enrollmentFilter.isActive = true;
-    where.enrollments = { some: enrollmentFilter };
+  const enrollmentFilter: any = {
+    isActive: true,
+  };
+
+  if (filters.classId) {
+    enrollmentFilter.classId = filters.classId;
   }
 
-  const [data, total] = await Promise.all([
+  if (filters.sectionId) {
+    enrollmentFilter.sectionId = filters.sectionId;
+  }
+
+  if (filters.academicYearId) {
+    enrollmentFilter.academicYearId = filters.academicYearId;
+  }
+
+  if (filters.classId || filters.sectionId || filters.academicYearId) {
+    where.enrollments = {
+      some: enrollmentFilter,
+    };
+  }
+
+  const [students, total] = await Promise.all([
     prisma.student.findMany({
       where,
       skip,
       take: limit,
-      orderBy: sortBy ? { [sortBy]: sortOrder || "asc" } : { createdAt: "desc" },
-      include: {
-        enrollments: {
-          where: { isActive: true },
-          include: {
-            section: { include: { class: true } },
-            academicYear: true,
+      orderBy: sortBy
+        ? {
+            [sortBy]: sortOrder || "asc",
+          }
+        : {
+            createdAt: "desc",
           },
-          take: 1,
-        },
-        parents: {
-          where: { isPrimary: true },
-          include: { parent: { select: { name: true, phone: true } } },
-        },
-      },
+
+      include: buildStudentInclude(),
     }),
-    prisma.student.count({ where }),
+
+    prisma.student.count({
+      where,
+    }),
   ]);
 
-  return { meta: { page, limit, total }, data };
+  return {
+    meta: {
+      page,
+      limit,
+      total,
+    },
+    data: students,
+  };
 };
+
+// ======================================================
+// GET SINGLE STUDENT
+// ======================================================
 
 const getStudentById = async (id: string) => {
   const student = await prisma.student.findFirst({
-    where: { id, isDeleted: false },
+    where: {
+      id,
+      isDeleted: false,
+    },
+
     include: {
       enrollments: {
-        orderBy: { createdAt: "desc" },
+        orderBy: {
+          createdAt: "desc",
+        },
         include: {
-          section: { include: { class: true } },
+          section: {
+            include: {
+              class: true,
+            },
+          },
           academicYear: true,
         },
       },
-      parents: { include: { parent: true } },
+
+      parents: {
+        include: {
+          parent: true,
+        },
+      },
+
       _count: {
-        select: { attendances: true, examResults: true, feePayments: true },
+        select: {
+          attendances: true,
+          examResults: true,
+          feePayments: true,
+        },
       },
     },
   });
-  if (!student) throw new ApiError(httpStatus.NOT_FOUND, "Student not found.");
+
+  if (!student) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Student not found.");
+  }
+
   return student;
 };
 
+// ======================================================
+// UPDATE STUDENT
+// ======================================================
+
 const updateStudent = async (
   id: string,
-  payload: { name?: string; dob?: string; gender?: string; address?: string; isActive?: boolean }
+  payload: {
+    name?: string;
+    dob?: string;
+    gender?: string;
+    address?: string;
+    isActive?: boolean;
+  },
 ) => {
-  const student = await prisma.student.findFirst({ where: { id, isDeleted: false } });
-  if (!student) throw new ApiError(httpStatus.NOT_FOUND, "Student not found.");
+  const student = await prisma.student.findFirst({
+    where: {
+      id,
+      isDeleted: false,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!student) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Student not found.");
+  }
 
   return prisma.student.update({
-    where: { id },
+    where: {
+      id,
+    },
+
     data: {
-      ...payload,
-      dob: payload.dob ? new Date(payload.dob) : undefined,
+      ...(payload.name && { name: payload.name }),
+      ...(payload.gender && { gender: payload.gender }),
+      ...(payload.address && { address: payload.address }),
+      ...(payload.isActive !== undefined && {
+        isActive: payload.isActive,
+      }),
+      ...(payload.dob && {
+        dob: new Date(payload.dob),
+      }),
     },
   });
 };
 
+// ======================================================
+// DELETE STUDENT (SOFT DELETE)
+// ======================================================
+
 const deleteStudent = async (id: string) => {
-  const student = await prisma.student.findFirst({ where: { id, isDeleted: false } });
-  if (!student) throw new ApiError(httpStatus.NOT_FOUND, "Student not found.");
-  return prisma.student.update({ where: { id }, data: { isDeleted: true, isActive: false } });
+  const student = await prisma.student.findFirst({
+    where: {
+      id,
+      isDeleted: false,
+    },
+    select: {
+      id: true,
+      userId: true,
+    },
+  });
+
+  if (!student) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Student not found.");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    // Soft delete student
+    await tx.student.update({
+      where: {
+        id,
+      },
+      data: {
+        isDeleted: true,
+        isActive: false,
+      },
+    });
+
+    // Disable user account
+    if (student.userId) {
+      await tx.user.update({
+        where: {
+          id: student.userId,
+        },
+        data: {
+          isDeleted: true,
+          isActive: false,
+        },
+      });
+    }
+
+    return null;
+  });
 };
 
-// ── Year-end Promotion ────────────────────────────────────────
+// ======================================================
+// PROMOTE STUDENTS
+// ======================================================
 
 const promoteStudents = async (payload: {
   studentIds: string[];
@@ -238,30 +543,47 @@ const promoteStudents = async (payload: {
   toSectionId: string;
   toAcademicYearId: string;
 }) => {
-  const [toSection, toYear] = await Promise.all([
-    prisma.section.findFirst({ where: { id: payload.toSectionId, classId: payload.toClassId } }),
-    prisma.academicYear.findUnique({ where: { id: payload.toAcademicYearId } }),
-  ]);
-  if (!toSection) throw new ApiError(httpStatus.NOT_FOUND, "Target section not found.");
-  if (!toYear) throw new ApiError(httpStatus.NOT_FOUND, "Target academic year not found.");
+  const targetSection = await prisma.section.findFirst({
+    where: {
+      id: payload.toSectionId,
+      classId: payload.toClassId,
+      isDeleted: false,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!targetSection) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Target section not found.");
+  }
 
   return prisma.$transaction(async (tx) => {
-    const results = await Promise.all(
-      payload.studentIds.map(async (studentId) => {
-        // Deactivate old enrollment
-        await tx.enrollment.updateMany({
-          where: { studentId, sectionId: payload.fromSectionId, isActive: true },
-          data: { isActive: false, isPromoted: true },
-        });
+    for (const studentId of payload.studentIds) {
+      // Deactivate old enrollment
+      await tx.enrollment.updateMany({
+        where: {
+          studentId,
+          sectionId: payload.fromSectionId,
+          isActive: true,
+        },
 
-        // Check if enrollment already exists for target year
-        const existing = await tx.enrollment.findFirst({
-          where: { studentId, academicYearId: payload.toAcademicYearId },
-        });
-        if (existing) return existing;
+        data: {
+          isActive: false,
+          isPromoted: true,
+        },
+      });
 
-        // Create new enrollment
-        return tx.enrollment.create({
+      // Check existing enrollment
+      const existing = await tx.enrollment.findFirst({
+        where: {
+          studentId,
+          academicYearId: payload.toAcademicYearId,
+        },
+      });
+
+      if (!existing) {
+        await tx.enrollment.create({
           data: {
             studentId,
             classId: payload.toClassId,
@@ -270,11 +592,18 @@ const promoteStudents = async (payload: {
             isActive: true,
           },
         });
-      })
-    );
-    return { promoted: results.length, enrollments: results };
+      }
+    }
+
+    return {
+      promoted: payload.studentIds.length,
+    };
   });
 };
+
+// ======================================================
+// TRANSFER SECTION
+// ======================================================
 
 const transferSection = async (payload: {
   studentId: string;
@@ -282,47 +611,81 @@ const transferSection = async (payload: {
   academicYearId: string;
 }) => {
   const newSection = await prisma.section.findFirst({
-    where: { id: payload.newSectionId, isDeleted: false },
-    include: { class: true },
-  });
-  if (!newSection) throw new ApiError(httpStatus.NOT_FOUND, "New section not found.");
+    where: {
+      id: payload.newSectionId,
+      isDeleted: false,
+    },
 
-  const currentEnrollment = await prisma.enrollment.findFirst({
-    where: { studentId: payload.studentId, academicYearId: payload.academicYearId, isActive: true },
+    select: {
+      id: true,
+      classId: true,
+    },
   });
-  if (!currentEnrollment)
-    throw new ApiError(httpStatus.NOT_FOUND, "Active enrollment not found for this student.");
+
+  if (!newSection) {
+    throw new ApiError(httpStatus.NOT_FOUND, "New section not found.");
+  }
+
+  const enrollment = await prisma.enrollment.findFirst({
+    where: {
+      studentId: payload.studentId,
+      academicYearId: payload.academicYearId,
+      isActive: true,
+    },
+
+    select: {
+      id: true,
+    },
+  });
+
+  if (!enrollment) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Active enrollment not found.");
+  }
 
   return prisma.enrollment.update({
-    where: { id: currentEnrollment.id },
-    data: { sectionId: payload.newSectionId, classId: newSection.classId },
+    where: {
+      id: enrollment.id,
+    },
+
+    data: {
+      sectionId: payload.newSectionId,
+      classId: newSection.classId,
+    },
   });
 };
 
-// ── Parent ────────────────────────────────────────────────────
+// ======================================================
+// GET STUDENTS BY PARENT
+// ======================================================
 
 const getStudentsByParent = async (parentId: string) => {
   const parent = await prisma.parent.findFirst({
-    where: { id: parentId, isDeleted: false },
+    where: {
+      id: parentId,
+      isDeleted: false,
+    },
+
     include: {
       children: {
         include: {
           student: {
-            include: {
-              enrollments: {
-                where: { isActive: true },
-                include: { section: { include: { class: true } }, academicYear: true },
-                take: 1,
-              },
-            },
+            include: buildStudentInclude(),
           },
         },
       },
     },
   });
-  if (!parent) throw new ApiError(httpStatus.NOT_FOUND, "Parent not found.");
+
+  if (!parent) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Parent not found.");
+  }
+
   return parent;
 };
+
+// ======================================================
+// EXPORTS
+// ======================================================
 
 export const StudentService = {
   admitStudent,

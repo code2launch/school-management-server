@@ -1,96 +1,123 @@
 model Student {
-  id              String    @id @default(uuid())
-  userId          String?   @unique
-  studentId       String    @unique // e.g. STD-2024-001
-  name            String
-  dob             DateTime? @db.Date
-  gender          String?
-  address         String?
-  photo           String?
-  isActive        Boolean   @default(true)
-  isDeleted       Boolean   @default(false)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id        String    @id @default(uuid())
+  userId    String?   @unique
+  studentId String    @unique // e.g. STD-2024-001
+  name      String
+  dob       DateTime? @db.Date
+  gender    String?
+  address   String?
+  photo     String?
+  isActive  Boolean   @default(true)
+  isDeleted Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 
-  user            User?     @relation(fields: [userId], references: [id])
-  parents         StudentParent[]
-  enrollments     Enrollment[]
-  attendances     StudentAttendance[]
-  examResults     ExamResult[]
-  feePayments     FeePayment[]
+  user        User?               @relation(fields: [userId], references: [id])
+  parents     StudentParent[]
+  enrollments Enrollment[]
+  attendances StudentAttendance[]
+  examResults ExamResult[]
+  feePayments FeePayment[]
 
   @@map("students")
 }
 
 model Parent {
-  id          String    @id @default(uuid())
-  userId      String?   @unique
-  name        String
-  phone       String    @unique
-  relation    String?   // Father, Mother, Guardian
-  isActive    Boolean   @default(true)
-  isDeleted   Boolean   @default(false)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id        String   @id @default(uuid())
+  userId    String?  @unique
+  name      String
+  phone     String   @unique
+  relation  String? // Father, Mother, Guardian
+  isActive  Boolean  @default(true)
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  user        User?     @relation(fields: [userId], references: [id])
-  children    StudentParent[]
+  user     User?           @relation(fields: [userId], references: [id])
+  children StudentParent[]
 
   @@map("parents")
 }
 
 model StudentParent {
-  id          String    @id @default(uuid())
-  studentId   String
-  parentId    String
-  isPrimary   Boolean   @default(false)
-  createdAt   DateTime  @default(now())
+  id        String   @id @default(uuid())
+  studentId String
+  parentId  String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
 
-  student     Student   @relation(fields: [studentId], references: [id])
-  parent      Parent    @relation(fields: [parentId], references: [id])
+  student Student @relation(fields: [studentId], references: [id])
+  parent  Parent  @relation(fields: [parentId], references: [id])
 
   @@unique([studentId, parentId])
   @@map("student_parents")
 }
 
 model Enrollment {
-  id            String    @id @default(uuid())
-  studentId     String
-  classId       String
-  sectionId     String
+  id             String   @id @default(uuid())
+  studentId      String
+  classId        String
+  sectionId      String
   academicYearId String
-  rollNumber    String?
-  isPromoted    Boolean   @default(false)
-  isActive      Boolean   @default(true)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  rollNumber     String?
+  isPromoted     Boolean  @default(false)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  student       Student      @relation(fields: [studentId], references: [id])
-  class         Class        @relation(fields: [classId], references: [id])
-  section       Section      @relation(fields: [sectionId], references: [id])
-  academicYear  AcademicYear @relation(fields: [academicYearId], references: [id])
+  student      Student      @relation(fields: [studentId], references: [id])
+  class        Class        @relation(fields: [classId], references: [id])
+  section      Section      @relation(fields: [sectionId], references: [id])
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id])
 
   @@unique([studentId, academicYearId])
   @@map("enrollments")
 }
 
 model StudentAttendance {
-  id              String           @id @default(uuid())
-  studentId       String
-  sectionId       String
-  academicYearId  String
-  date            DateTime         @db.Date
-  status          AttendanceStatus
+  id               String           @id @default(uuid())
+  studentId        String
+  sectionId        String
+  academicYearId   String
+  date             DateTime         @db.Date
+  status           AttendanceStatus
   takenByTeacherId String?
-  note            String?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  note             String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
-  student         Student          @relation(fields: [studentId], references: [id])
-  section         Section          @relation(fields: [sectionId], references: [id])
-  academicYear    AcademicYear     @relation(fields: [academicYearId], references: [id])
-  takenByTeacher  Teacher?         @relation(fields: [takenByTeacherId], references: [id])
+  student        Student      @relation(fields: [studentId], references: [id])
+  section        Section      @relation(fields: [sectionId], references: [id])
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  takenByTeacher Teacher?     @relation(fields: [takenByTeacherId], references: [id])
 
   @@unique([studentId, date])
   @@map("student_attendances")
 }
+
+// model StudentAttendance {
+//   id               String           @id @default(uuid())
+//   studentId        String
+//   sectionId        String
+//   academicYearId   String
+//   date             DateTime         @db.Date
+//   status           AttendanceStatus
+//   takenByTeacherId String?
+//   note             String?
+//   createdAt        DateTime         @default(now())
+//   updatedAt        DateTime         @updatedAt
+
+//   student          Student          @relation(fields: [studentId], references: [id])
+//   section          Section          @relation(fields: [sectionId], references: [id])
+//   academicYear     AcademicYear     @relation(fields: [academicYearId], references: [id])
+//   takenByTeacher   Teacher?         @relation(fields: [takenByTeacherId], references: [id])
+
+//   @@unique([studentId, date])
+
+//   @@index([sectionId, date])
+//   @@index([academicYearId])
+//   @@index([studentId])
+//   @@index([date])
+
+//   @@map("student_attendances")
+// }

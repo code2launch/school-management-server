@@ -10,15 +10,27 @@ router.post(
   "/admit",
   auth("ADMIN"),
   validateRequest(StudentValidation.createStudent),
-  StudentController.admitStudent
+  StudentController.admitStudent,
 );
 router.get("/", auth("ADMIN", "TEACHER"), StudentController.getAllStudents);
-router.get("/:id", auth("ADMIN", "TEACHER", "STUDENT", "PARENT"), StudentController.getStudentById);
+
+router.get(
+  "/parent/:parentId",
+  auth("ADMIN", "PARENT"),
+  StudentController.getStudentsByParent,
+);
+
+router.get(
+  "/:id",
+  auth("ADMIN", "TEACHER", "STUDENT", "PARENT"),
+  StudentController.getStudentById,
+);
+
 router.patch(
   "/:id",
   auth("ADMIN"),
   validateRequest(StudentValidation.updateStudent),
-  StudentController.updateStudent
+  StudentController.updateStudent,
 );
 router.delete("/:id", auth("ADMIN"), StudentController.deleteStudent);
 
@@ -26,15 +38,13 @@ router.post(
   "/promote",
   auth("ADMIN"),
   validateRequest(StudentValidation.promoteStudents),
-  StudentController.promoteStudents
+  StudentController.promoteStudents,
 );
 router.patch(
   "/transfer-section",
   auth("ADMIN"),
   validateRequest(StudentValidation.transferSection),
-  StudentController.transferSection
+  StudentController.transferSection,
 );
-
-router.get("/parent/:parentId", auth("ADMIN", "PARENT"), StudentController.getStudentsByParent);
 
 export const StudentRouter = router;
