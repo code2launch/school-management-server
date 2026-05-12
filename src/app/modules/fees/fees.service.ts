@@ -1,10 +1,16 @@
 import httpStatus from "http-status";
-import { FeeType, PaymentStatus } from "@prisma/client";
+
+import { FeeType, PaymentStatus, Prisma } from "@prisma/client";
+
 import { prisma } from "../../shared/prisma";
+
 import ApiError from "../../errors/ApiError";
+
 import { generateReceiptNumber } from "../../constants";
 
-// ── Fee Structure ─────────────────────────────────────────────
+// ======================================================
+// CREATE FEE STRUCTURE
+// ======================================================
 
 const createFeeStructure = async (payload: {
   feeType: FeeType;
@@ -13,27 +19,117 @@ const createFeeStructure = async (payload: {
   academicYearId: string;
   classId?: string;
 }) => {
-  return prisma.feeStructure.create({ data: payload });
+  // prevent duplicates
+
+  const existing = await prisma.feeStructure.findFirst({
+    where: {
+      academicYearId: payload.academicYearId,
+
+      feeType: payload.feeType,
+
+      classId: payload.classId ?? null,
+
+      isActive: true,
+    },
+
+    select: {
+      id: true,
+    },
+  });
+
+  if (existing) {
+    throw new ApiError(httpStatus.CONFLICT, "Fee structure already exists");
+  }
+
+  return prisma.feeStructure.create({
+    data: {
+      ...payload,
+
+      amount: new Prisma.Decimal(payload.amount),
+    },
+  });
 };
+
+// ======================================================
+// GET FEE STRUCTURES
+// ======================================================
 
 const getFeeStructures = async (academicYearId: string, classId?: string) => {
   return prisma.feeStructure.findMany({
     where: {
       academicYearId,
+
       isActive: true,
-      ...(classId ? { OR: [{ classId }, { classId: null }] } : {}),
+
+      ...(classId
+        ? {
+            OR: [{ classId }, { classId: null }],
+          }
+        : {}),
     },
-    orderBy: { feeType: "asc" },
+
+    select: {
+      id: true,
+      feeType: true,
+      amount: true,
+      label: true,
+      classId: true,
+    },
+
+    orderBy: [
+      {
+        feeType: "asc",
+      },
+    ],
   });
 };
 
-const updateFeeStructure = async (id: string, payload: { amount?: number; label?: string; isActive?: boolean }) => {
-  const fee = await prisma.feeStructure.findUnique({ where: { id } });
-  if (!fee) throw new ApiError(httpStatus.NOT_FOUND, "Fee structure not found.");
-  return prisma.feeStructure.update({ where: { id }, data: payload });
+// ======================================================
+// UPDATE FEE STRUCTURE
+// ======================================================
+
+const updateFeeStructure = async (
+  id: string,
+  payload: {
+    amount?: number;
+    label?: string;
+    isActive?: boolean;
+  },
+) => {
+  const fee = await prisma.feeStructure.findUnique({
+    where: { id },
+
+    select: {
+      id: true,
+    },
+  });
+
+  if (!fee) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Fee structure not found");
+  }
+
+  return prisma.feeStructure.update({
+    where: { id },
+
+    data: {
+      ...(payload.amount && {
+        amount: new Prisma.Decimal(payload.amount),
+      }),
+
+      ...(payload.label && {
+        label: payload.label,
+      }),
+
+      ...(payload.isActive !== undefined && {
+        isActive: payload.isActive,
+      }),
+    },
+  });
 };
 
-// ── Payments ──────────────────────────────────────────────────
+// ======================================================
+// RECORD PAYMENT
+// ======================================================
 
 const recordPayment = async (
   payload: {
@@ -48,161 +144,436 @@ const recordPayment = async (
     paymentDate?: string;
     note?: string;
   },
-  collectedBy?: string
+  collectedBy?: string,
 ) => {
-  const student = await prisma.student.findFirst({ where: { id: payload.studentId, isDeleted: false } });
-  if (!student) throw new ApiError(httpStatus.NOT_FOUND, "Student not found.");
-
-  // Check for duplicate monthly fee
-  if (payload.feeType === "MONTHLY_TUITION" && payload.month && payload.year) {
-    const duplicate = await prisma.feePayment.findFirst({
-      where: {
-        studentId: payload.studentId,
-        academicYearId: payload.academicYearId,
-        feeType: payload.feeType,
-        month: payload.month,
-        year: payload.year,
-        paymentStatus: { in: ["PAID", "PARTIAL"] },
-      },
-    });
-    if (duplicate && duplicate.paymentStatus === "PAID")
-      throw new ApiError(httpStatus.CONFLICT, "Monthly fee already fully paid for this month.");
+  // Validate inputs early
+  if (payload.paidAmount > payload.amount) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      "Paid amount cannot exceed total amount",
+    );
   }
 
-  const dueAmount = payload.amount - payload.paidAmount;
-  let paymentStatus: PaymentStatus = "UNPAID";
-  if (payload.paidAmount >= payload.amount) paymentStatus = "PAID";
-  else if (payload.paidAmount > 0) paymentStatus = "PARTIAL";
+  // Generate receipt number outside transaction to reduce transaction time
+  const year = new Date().getFullYear();
+  let receiptNumber: string;
 
-  // Generate receipt number
-  const count = await prisma.feePayment.count();
-  const receiptNumber = generateReceiptNumber(
-    payload.year ?? new Date().getFullYear(),
-    count + 1
-  );
+  // Get receipt number with a separate lighter query
+  try {
+    const count = await prisma.feePayment.count();
+    receiptNumber = generateReceiptNumber(year, count + 1);
+  } catch (error) {
+    throw new ApiError(
+      httpStatus.INTERNAL_SERVER_ERROR,
+      "Failed to generate receipt number",
+    );
+  }
 
-  return prisma.feePayment.create({
-    data: {
-      receiptNumber,
-      studentId: payload.studentId,
-      academicYearId: payload.academicYearId,
-      feeType: payload.feeType,
-      month: payload.month,
-      year: payload.year,
-      amount: payload.amount,
-      paidAmount: payload.paidAmount,
-      dueAmount,
-      paymentStatus,
-      paymentMethod: payload.paymentMethod,
-      paymentDate: payload.paymentDate ? new Date(payload.paymentDate) : new Date(),
-      collectedBy,
-      note: payload.note,
+  // Use transaction with increased timeout and optimized isolation level
+  return prisma.$transaction(
+    async (tx) => {
+      // Validate student existence with minimal fields
+      const student = await tx.student.findFirst({
+        where: {
+          id: payload.studentId,
+          isDeleted: false,
+        },
+        select: {
+          id: true,
+          name: true,
+          studentId: true,
+        },
+      });
+
+      if (!student) {
+        throw new ApiError(httpStatus.NOT_FOUND, "Student not found");
+      }
+
+      // Check for duplicate monthly payment (optimized query)
+      if (
+        payload.feeType === "MONTHLY_TUITION" &&
+        payload.month &&
+        payload.year
+      ) {
+        const existing = await tx.feePayment.findFirst({
+          where: {
+            studentId: payload.studentId,
+            academicYearId: payload.academicYearId,
+            feeType: "MONTHLY_TUITION",
+            month: payload.month,
+            year: payload.year,
+            paymentStatus: "PAID",
+          },
+          select: { id: true },
+        });
+
+        if (existing) {
+          throw new ApiError(
+            httpStatus.CONFLICT,
+            "Monthly tuition already paid",
+          );
+        }
+      }
+
+      // Calculate status and due amount
+      let paymentStatus: PaymentStatus = "UNPAID";
+      if (payload.paidAmount === payload.amount) {
+        paymentStatus = "PAID";
+      } else if (payload.paidAmount > 0) {
+        paymentStatus = "PARTIAL";
+      }
+
+      const dueAmount = payload.amount - payload.paidAmount;
+
+      // Create payment record
+      const payment = await tx.feePayment.create({
+        data: {
+          receiptNumber,
+          studentId: payload.studentId,
+          academicYearId: payload.academicYearId,
+          feeType: payload.feeType,
+          month: payload.month,
+          year: payload.year,
+          amount: new Prisma.Decimal(payload.amount),
+          paidAmount: new Prisma.Decimal(payload.paidAmount),
+          dueAmount: new Prisma.Decimal(dueAmount),
+          paymentStatus,
+          paymentMethod: payload.paymentMethod,
+          paymentDate: payload.paymentDate
+            ? new Date(payload.paymentDate)
+            : new Date(),
+          collectedBy,
+          note: payload.note,
+        },
+        include: {
+          student: {
+            select: {
+              name: true,
+              studentId: true,
+            },
+          },
+        },
+      });
+
+      return payment;
     },
-    include: {
-      student: { select: { name: true, studentId: true } },
+    {
+      // Increase transaction timeout (default is 5 seconds)
+      timeout: 15000, // 15 seconds
+      // Set isolation level to reduce locks
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      // Maximum retries for transaction conflicts
+      maxWait: 10000, // Wait max 10 seconds for transaction to start
+    },
+  );
+};
+
+// ======================================================
+// STUDENT PAYMENTS
+// ======================================================
+
+const getStudentPayments = async (
+  studentId: string,
+  academicYearId: string,
+) => {
+  const student = await prisma.student.findUnique({
+    where: {
+      id: studentId,
+    },
+
+    select: {
+      id: true,
+      name: true,
+      studentId: true,
     },
   });
+
+  if (!student) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Student not found");
+  }
+
+  const payments = await prisma.feePayment.findMany({
+    where: {
+      studentId,
+      academicYearId,
+    },
+
+    orderBy: {
+      createdAt: "desc",
+    },
+  });
+
+  const summary = payments.reduce(
+    (acc, p) => {
+      acc.totalAmount += Number(p.amount);
+
+      acc.totalPaid += Number(p.paidAmount);
+
+      acc.totalDue += Number(p.dueAmount);
+
+      return acc;
+    },
+
+    {
+      totalAmount: 0,
+      totalPaid: 0,
+      totalDue: 0,
+    },
+  );
+
+  return {
+    student,
+    summary,
+    payments,
+  };
 };
 
-const getStudentPayments = async (studentId: string, academicYearId: string) => {
-  const [payments, student] = await Promise.all([
-    prisma.feePayment.findMany({
-      where: { studentId, academicYearId },
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.student.findUnique({
-      where: { id: studentId },
-      select: { name: true, studentId: true },
-    }),
-  ]);
-
-  const totalAmount = payments.reduce((s, p) => s + p.amount, 0);
-  const totalPaid = payments.reduce((s, p) => s + p.paidAmount, 0);
-  const totalDue = payments.reduce((s, p) => s + p.dueAmount, 0);
-
-  return { student, totalAmount, totalPaid, totalDue, payments };
-};
+// ======================================================
+// PENDING DUES
+// ======================================================
 
 const getPendingDues = async (
   academicYearId: string,
   classId?: string,
-  sectionId?: string
+  sectionId?: string,
 ) => {
-  const enrollmentFilter: any = { academicYearId, isActive: true };
-  if (classId) enrollmentFilter.classId = classId;
-  if (sectionId) enrollmentFilter.sectionId = sectionId;
+  return prisma.enrollment.findMany({
+    where: {
+      academicYearId,
 
-  const enrollments = await prisma.enrollment.findMany({
-    where: enrollmentFilter,
-    include: {
+      isActive: true,
+
+      ...(classId && {
+        classId,
+      }),
+
+      ...(sectionId && {
+        sectionId,
+      }),
+
       student: {
-        select: { id: true, name: true, studentId: true },
-        include: {
+        feePayments: {
+          some: {
+            paymentStatus: {
+              in: ["UNPAID", "PARTIAL"],
+            },
+          },
+        },
+      },
+    },
+
+    select: {
+      student: {
+        select: {
+          id: true,
+          name: true,
+          studentId: true,
+
           feePayments: {
             where: {
               academicYearId,
-              paymentStatus: { in: ["UNPAID", "PARTIAL"] },
+
+              paymentStatus: {
+                in: ["UNPAID", "PARTIAL"],
+              },
             },
-            select: { id: true, feeType: true, dueAmount: true, month: true, year: true, paymentStatus: true },
+
+            select: {
+              id: true,
+              feeType: true,
+              dueAmount: true,
+              paymentStatus: true,
+              month: true,
+              year: true,
+            },
           },
-        } as any,
+        },
       },
-      section: { include: { class: true } },
+
+      section: {
+        select: {
+          name: true,
+
+          class: {
+            select: {
+              name: true,
+            },
+          },
+        },
+      },
     },
   });
-
-  return enrollments
-    .filter((e) => (e.student as any).feePayments?.length > 0)
-    .map((e) => ({
-      student: { id: (e.student as any).id, name: (e.student as any).name, studentId: (e.student as any).studentId },
-      class: (e.section as any).class?.name,
-      section: e.section?.name,
-      dues: (e.student as any).feePayments,
-      totalDue: (e.student as any).feePayments.reduce((s: number, p: any) => s + p.dueAmount, 0),
-    }));
 };
+
+// ======================================================
+// RECEIPT
+// ======================================================
+
+// const getReceipt = async (receiptNumber: string) => {
+//   const payment = await prisma.feePayment.findUnique({
+//     where: {
+//       receiptNumber,
+//     },
+
+//     include: {
+//       student: {
+//         select: {
+//           name: true,
+//           studentId: true,
+
+//           enrollments: {
+//             where: {
+//               isActive: true,
+//             },
+
+//             take: 1,
+
+//             select: {
+//               section: {
+//                 select: {
+//                   name: true,
+
+//                   class: {
+//                     select: {
+//                       name: true,
+//                     },
+//                   },
+//                 },
+//               },
+//             },
+//           },
+//         },
+//       },
+
+//       academicYear: true,
+//     },
+//   });
+
+//   if (!payment) {
+//     throw new ApiError(httpStatus.NOT_FOUND, "Receipt not found");
+//   }
+
+//   const school = await prisma.schoolProfile.findFirst({
+//     select: {
+//       name: true,
+//       logo: true,
+//       address: true,
+//       phone: true,
+//     },
+//   });
+
+//   return {
+//     school,
+//     payment,
+//   };
+// };
 
 const getReceipt = async (receiptNumber: string) => {
   const payment = await prisma.feePayment.findUnique({
-    where: { receiptNumber },
+    where: {
+      receiptNumber,
+    },
     include: {
       student: {
-        select: { name: true, studentId: true },
-        include: {
+        select: {
+          name: true,
+          studentId: true,
           enrollments: {
-            where: { isActive: true },
-            include: { section: { include: { class: true } } },
+            where: {
+              isActive: true,
+            },
             take: 1,
+            select: {
+              section: {
+                select: {
+                  name: true,
+                  class: {
+                    select: {
+                      name: true,
+                    },
+                  },
+                },
+              },
+            },
           },
-        } as any,
+        },
       },
       academicYear: true,
     },
   });
-  if (!payment) throw new ApiError(httpStatus.NOT_FOUND, "Receipt not found.");
 
-  const school = await prisma.schoolProfile.findFirst();
-  return { school, payment };
+  if (!payment) {
+    throw new ApiError(httpStatus.NOT_FOUND, "Receipt not found");
+  }
+
+  // Fixed: Use 'logoUrl' instead of 'logo'
+  const school = await prisma.schoolProfile.findFirst({
+    select: {
+      name: true,
+      logoUrl: true, // Changed from 'logo' to 'logoUrl'
+      address: true,
+      phone: true,
+      email: true, // You might want to include email as well
+    },
+  });
+
+  return {
+    school,
+    payment,
+  };
 };
 
-const getFeeCollectionReport = async (academicYearId: string, month?: number, year?: number) => {
-  const where: any = { academicYearId };
+// ======================================================
+// COLLECTION REPORT
+// ======================================================
+
+const getFeeCollectionReport = async (
+  academicYearId: string,
+  month?: number,
+  year?: number,
+) => {
+  const where: Prisma.FeePaymentWhereInput = {
+    academicYearId,
+  };
+
   if (month && year) {
     where.month = month;
     where.year = year;
   }
 
-  const payments = await prisma.feePayment.groupBy({
+  const grouped = await prisma.feePayment.groupBy({
     by: ["feeType", "paymentStatus"],
+
     where,
-    _sum: { paidAmount: true, dueAmount: true, amount: true },
+
+    _sum: {
+      amount: true,
+      paidAmount: true,
+      dueAmount: true,
+    },
+
     _count: true,
   });
 
-  const totalCollected = payments.reduce((s, p) => s + (p._sum.paidAmount ?? 0), 0);
-  const totalDue = payments.reduce((s, p) => s + (p._sum.dueAmount ?? 0), 0);
+  const totals = grouped.reduce(
+    (acc, item) => {
+      acc.totalCollected += Number(item._sum.paidAmount ?? 0);
 
-  return { totalCollected, totalDue, breakdown: payments };
+      acc.totalDue += Number(item._sum.dueAmount ?? 0);
+
+      return acc;
+    },
+
+    {
+      totalCollected: 0,
+      totalDue: 0,
+    },
+  );
+
+  return {
+    ...totals,
+    breakdown: grouped,
+  };
 };
 
 export const FeesService = {
