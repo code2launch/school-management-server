@@ -36,7 +36,10 @@ const getAttendanceReport = async (params: {
       student: { select: { id: true, name: true, studentId: true } },
       section: { include: { class: { select: { name: true } } } },
     },
-    orderBy: [{ section: { class: { numericValue: "asc" } } }, { rollNumber: "asc" }],
+    orderBy: [
+      { section: { class: { numericValue: "asc" } } },
+      { rollNumber: "asc" },
+    ],
   });
 
   const studentIds = enrollments.map((e) => e.studentId);
@@ -50,9 +53,13 @@ const getAttendanceReport = async (params: {
   });
 
   // Group by student
-  const attMap = new Map<string, { P: number; A: number; L: number; La: number }>();
+  const attMap = new Map<
+    string,
+    { P: number; A: number; L: number; La: number }
+  >();
   for (const a of attendances) {
-    if (!attMap.has(a.studentId)) attMap.set(a.studentId, { P: 0, A: 0, L: 0, La: 0 });
+    if (!attMap.has(a.studentId))
+      attMap.set(a.studentId, { P: 0, A: 0, L: 0, La: 0 });
     const counts = attMap.get(a.studentId)!;
     if (a.status === "PRESENT") counts.P++;
     else if (a.status === "ABSENT") counts.A++;
@@ -60,9 +67,10 @@ const getAttendanceReport = async (params: {
     else if (a.status === "LATE") counts.La++;
   }
 
-  const workingDays = attendances.length > 0
-    ? new Set(attendances.map((a) => a.date.toISOString().split("T")[0])).size
-    : 0;
+  const workingDays =
+    attendances.length > 0
+      ? new Set(attendances.map((a) => a.date.toISOString().split("T")[0])).size
+      : 0;
 
   const rows = enrollments.map((e) => {
     const att = attMap.get(e.studentId) ?? { P: 0, A: 0, L: 0, La: 0 };
@@ -122,27 +130,44 @@ const getFeeCollectionReport = async (params: {
 
   // Filter by class if requested
   if (classId) {
-    payments = payments.filter((p) =>
-      (p.student as any).enrollments?.[0]?.section?.class?.id === classId
+    payments = payments.filter(
+      (p) =>
+        (p.student as any).enrollments?.[0]?.section?.class?.id === classId,
     );
   }
 
-  const totalCollected = payments.reduce((s, p) => s + p.paidAmount, 0);
-  const totalDue = payments.reduce((s, p) => s + p.dueAmount, 0);
-  const totalExpected = payments.reduce((s, p) => s + p.amount, 0);
+  const totalCollected = payments.reduce(
+    (s, p) => s + p.paidAmount.toNumber(),
+    0,
+  );
+
+  const totalDue = payments.reduce((s, p) => s + p.dueAmount.toNumber(), 0);
+
+  const totalExpected = payments.reduce((s, p) => s + p.amount.toNumber(), 0);
 
   // Group by fee type
-  const byType: Record<string, { count: number; collected: number; due: number }> = {};
+  const byType: Record<
+    string,
+    { count: number; collected: number; due: number }
+  > = {};
   for (const p of payments) {
-    if (!byType[p.feeType]) byType[p.feeType] = { count: 0, collected: 0, due: 0 };
+    if (!byType[p.feeType])
+      byType[p.feeType] = { count: 0, collected: 0, due: 0 };
     byType[p.feeType].count++;
-    byType[p.feeType].collected += p.paidAmount;
-    byType[p.feeType].due += p.dueAmount;
+    byType[p.feeType].collected += p.paidAmount.toNumber();
+    byType[p.feeType].due += p.dueAmount.toNumber();
   }
 
   return {
-    month, year, totalExpected, totalCollected, totalDue,
-    collectionRate: totalExpected > 0 ? Math.round((totalCollected / totalExpected) * 100) : 0,
+    month,
+    year,
+    totalExpected,
+    totalCollected,
+    totalDue,
+    collectionRate:
+      totalExpected > 0
+        ? Math.round((totalCollected / totalExpected) * 100)
+        : 0,
     byType,
     payments: payments.map((p) => ({
       receiptNumber: p.receiptNumber,
@@ -173,8 +198,41 @@ const getStudentListByClass = async (params: {
   if (classId) where.classId = classId;
   if (sectionId) where.sectionId = sectionId;
 
+  // const enrollments = await prisma.enrollment.findMany({
+  //   where,
+  //   include: {
+  //     student: {
+  //       select: {
+  //         id: true,
+  //         name: true,
+  //         studentId: true,
+  //         dob: true,
+  //         gender: true,
+  //         phone: true,
+  //       },
+  //       include: {
+  //         parents: {
+  //           where: { isPrimary: true },
+  //           include: { parent: { select: { name: true, phone: true } } },
+  //         },
+  //       } as any,
+  //     },
+  //     section: {
+  //       include: {
+  //         class: { select: { id: true, name: true, numericValue: true } },
+  //       },
+  //     },
+  //   },
+  //   orderBy: [
+  //     { section: { class: { numericValue: "asc" } } },
+  //     { section: { name: "asc" } },
+  //     { rollNumber: "asc" },
+  //   ],
+  // });
+
   const enrollments = await prisma.enrollment.findMany({
     where,
+
     include: {
       student: {
         select: {
@@ -183,21 +241,55 @@ const getStudentListByClass = async (params: {
           studentId: true,
           dob: true,
           gender: true,
-          phone: true,
-        },
-        include: {
+
           parents: {
-            where: { isPrimary: true },
-            include: { parent: { select: { name: true, phone: true } } },
+            where: {
+              isPrimary: true,
+            },
+
+            include: {
+              parent: {
+                select: {
+                  name: true,
+                  phone: true,
+                },
+              },
+            },
           },
-        } as any,
+        },
       },
-      section: { include: { class: { select: { id: true, name: true, numericValue: true } } } },
+
+      section: {
+        include: {
+          class: {
+            select: {
+              id: true,
+              name: true,
+              numericValue: true,
+            },
+          },
+        },
+      },
     },
+
     orderBy: [
-      { section: { class: { numericValue: "asc" } } },
-      { section: { name: "asc" } },
-      { rollNumber: "asc" },
+      {
+        section: {
+          class: {
+            numericValue: "asc",
+          },
+        },
+      },
+
+      {
+        section: {
+          name: "asc",
+        },
+      },
+
+      {
+        rollNumber: "asc",
+      },
     ],
   });
 
@@ -241,7 +333,10 @@ const getResultSheetReport = async (params: {
   });
   if (!exam) throw new ApiError(httpStatus.NOT_FOUND, "Exam not found.");
 
-  const enrollmentFilter: any = { academicYearId: exam.academicYearId, isActive: true };
+  const enrollmentFilter: any = {
+    academicYearId: exam.academicYearId,
+    isActive: true,
+  };
   if (sectionId) enrollmentFilter.sectionId = sectionId;
   else if (classId) enrollmentFilter.classId = classId;
 
@@ -251,7 +346,10 @@ const getResultSheetReport = async (params: {
       student: { select: { id: true, name: true, studentId: true } },
       section: { include: { class: true } },
     },
-    orderBy: [{ section: { class: { numericValue: "asc" } } }, { rollNumber: "asc" }],
+    orderBy: [
+      { section: { class: { numericValue: "asc" } } },
+      { rollNumber: "asc" },
+    ],
   });
 
   const studentIds = enrollments.map((e) => e.studentId);
@@ -259,7 +357,7 @@ const getResultSheetReport = async (params: {
     where: { examId, studentId: { in: studentIds } },
   });
 
-  const resultMap = new Map<string, Map<string, typeof results[0]>>();
+  const resultMap = new Map<string, Map<string, (typeof results)[0]>>();
   for (const r of results) {
     if (!resultMap.has(r.studentId)) resultMap.set(r.studentId, new Map());
     resultMap.get(r.studentId)!.set(r.subjectId, r);
@@ -277,8 +375,13 @@ const getResultSheetReport = async (params: {
         isPassed: r?.isPassed ?? null,
       };
     });
-    const attempted = subjects.filter((s) => typeof s.marksObtained === "number");
-    const totalObtained = attempted.reduce((s, r) => s + (typeof r.marksObtained === "number" ? r.marksObtained : 0), 0);
+    const attempted = subjects.filter(
+      (s) => typeof s.marksObtained === "number",
+    );
+    const totalObtained = attempted.reduce(
+      (s, r) => s + (typeof r.marksObtained === "number" ? r.marksObtained : 0),
+      0,
+    );
     const totalMax = attempted.reduce((s, r) => s + r.totalMarks, 0);
 
     return {
@@ -290,8 +393,10 @@ const getResultSheetReport = async (params: {
       subjects,
       totalObtained,
       totalMax,
-      percentage: totalMax > 0 ? Math.round((totalObtained / totalMax) * 100) : 0,
-      isPassed: attempted.length > 0 && attempted.every((s) => s.isPassed === true),
+      percentage:
+        totalMax > 0 ? Math.round((totalObtained / totalMax) * 100) : 0,
+      isPassed:
+        attempted.length > 0 && attempted.every((s) => s.isPassed === true),
     };
   });
 
@@ -299,7 +404,11 @@ const getResultSheetReport = async (params: {
   const passed = rows.filter((r) => r.isPassed).length;
 
   return {
-    exam: { name: exam.name, type: exam.examType, year: (exam as any).academicYear?.year },
+    exam: {
+      name: exam.name,
+      type: exam.examType,
+      year: (exam as any).academicYear?.year,
+    },
     subjects: exam.subjects.map((s) => s.subject.name),
     totalStudents: rows.length,
     passed,
